@@ -3,7 +3,7 @@ import re
 import json
 import asyncio
 import datetime
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Dict, List, Optional, Set, Tuple
 
 import discord
 from dotenv import load_dotenv
@@ -27,18 +27,38 @@ CAMINHO_IGNORE = os.path.join(PASTA_ATUAL, "ignorar.txt")
 CAMINHO_SILENCIO = os.path.join(PASTA_ATUAL, "silencio.flag")
 
 # ================== CONFIG / IDS ==================
-JAPEX_ID = 1331505963622076476  # Fundador
+JAPEX_ID = 1331505963622076476  # Fundador (ID fixo)
+
+# >>> RECOMENDADO: preencha os IDs dos chefões para precisão total <<<
+# (Se deixar None, o bot tenta reconhecer pelo nome no display/username)
+CHEFOES_IDS = {
+    "lalomaio": None,   # ex: 111111111111111111
+    "santiago": None,
+    "purtuga": None,
+    "riquejoo": None,
+    "baddx_xd": None,
+}
+
+# Hierarquia “chefões” (quanto menor, mais alto)
+CHEFOES_HIERARQUIA = [
+    ("japex", "Fundador", 0),
+    ("lalomaio", "Criador do Exército", 1),
+    ("santiago", "Administrador", 2),
+    ("purtuga", "Supremo Tribunal Militar", 3),
+    ("riquejoo", "Moderador", 4),
+    ("baddx_xd", "Programador", 5),
+]
 
 # Histórico por canal (buffer), mas contexto usa só 3 msgs filtradas
 HISTORICO: Dict[int, List[dict]] = {}
 MAX_MSGS_CONTEXT = 3
 
-# Delay/cooldown anti-abuso (não mexe no lock global)
-MIN_DELAY_SECONDS = 1.4
-USER_COOLDOWN_SECONDS = 2.0
+# Delay/cooldown anti-abuso
+MIN_DELAY_SECONDS = 1.3
+USER_COOLDOWN_SECONDS = 1.8
 _last_user_action: Dict[int, float] = {}
 
-# ================== PATENTES (ordem menor = patente mais alta) ==================
+# ================== PATENTES EB (ordem menor = mais alto) ==================
 PATENTES = [
     ("[S-Cmdt]", "Sub Comandante", 2),
     ("[MR]", "Marechal", 3),
@@ -77,6 +97,9 @@ ocupado = asyncio.Lock()
 def normalizar_espacos(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
+def norm(s: str) -> str:
+    return normalizar_espacos(s).lower()
+
 def is_japex(user_id: int) -> bool:
     return user_id == JAPEX_ID
 
@@ -103,7 +126,7 @@ async def respeitar_delay_e_cooldown(user_id: int) -> bool:
         _last_user_action[user_id] = now
         await asyncio.sleep(MIN_DELAY_SECONDS)
     else:
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.35)
     return True
 
 # ================== IGNORADOS ==================
@@ -115,8 +138,6 @@ def carregar_ignorados() -> Set[int]:
         with open(CAMINHO_IGNORE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if not line:
-                    continue
                 if line.isdigit():
                     s.add(int(line))
     except:
@@ -171,12 +192,33 @@ def limpar_ordens() -> None:
     except:
         pass
 
-# ================== ROLES / PATENTE ==================
-def rank_order(member: discord.Member) -> Optional[int]:
+# ================== CHEFÕES (admins) ==================
+def chefe_info(member: discord.Member) -> Optional[Tuple[str, str, int]]:
     """
-    Retorna o menor 'ordem' encontrado nas roles do member, ou None se não achar.
-    Menor = mais alto.
+    Retorna (key, titulo, rank) se for chefão.
+    Usa ID se existir; senão tenta reconhecer pelo nome.
     """
+    if is_japex(member.id):
+        return ("japex", "Fundador", 0)
+
+    # por ID (mais seguro)
+    for key, titulo, rank in CHEFOES_HIERARQUIA:
+        cid = CHEFOES_IDS.get(key)
+        if cid and member.id == cid:
+            return (key, titulo, rank)
+
+    # fallback por nome (menos seguro)
+    dn = norm(member.display_name)
+    un = norm(getattr(member, "name", "") or "")
+    for key, titulo, rank in CHEFOES_HIERARQUIA:
+        if key == "japex":
+            continue
+        if key in dn or key in un:
+            return (key, titulo, rank)
+
+    return None
+
+def rank_patente(member: discord.Member) -> Optional[int]:
     best = None
     for role in getattr(member, "roles", []):
         rnome = role.name or ""
@@ -187,7 +229,6 @@ def rank_order(member: discord.Member) -> Optional[int]:
     if best is not None:
         return best
 
-    # fallback: tenta pelo nome do título
     for role in getattr(member, "roles", []):
         rnome = role.name or ""
         for tag, titulo, ordem in PATENTES:
@@ -197,9 +238,6 @@ def rank_order(member: discord.Member) -> Optional[int]:
     return best
 
 def best_patente_title(member: discord.Member) -> Optional[str]:
-    """
-    Melhor patente (maior) do member, como título sem colchetes.
-    """
     best_title = None
     best_ord = 999
     for role in getattr(member, "roles", []):
@@ -226,7 +264,8 @@ def roles_curto(member: discord.Member, max_roles: int = 10) -> List[str]:
         if r.is_default():
             continue
         roles.append(r.name.strip())
-    # põe patentes na frente (mais altas primeiro)
+
+    # patentes mais altas primeiro
     def key(nome: str) -> int:
         for tag, titulo, ordem in PATENTES:
             if tag in nome:
@@ -235,35 +274,49 @@ def roles_curto(member: discord.Member, max_roles: int = 10) -> List[str]:
     roles.sort(key=key)
     return roles[:max_roles]
 
-def tratamento_padrao(member: discord.Member) -> str:
-    """
-    Vocativo curto. Se tiver patente, use ela; senão, use nome.
-    Japex sempre 'Senhor Japex'.
-    """
-    if is_japex(member.id):
-        return "Senhor Japex"
+def vocativo(member: discord.Member) -> str:
+    info = chefe_info(member)
+    if info:
+        key, titulo, rank = info
+        if key == "japex":
+            return "Senhor Japex"
+        return titulo  # respeitoso e direto
     pat = best_patente_title(member)
     return pat if pat else member.display_name
 
-def autor_e_superior_do_bot(author: discord.Member, guild: discord.Guild) -> bool:
+def ack_superior(member: discord.Member) -> str:
     """
-    Retorna True se author pode mandar no bot:
-    - Japex sempre True
-    - Se author tiver patente mais alta (ordem menor) que a do bot, True
+    Resposta curta: "Sim, X."
+    Japex recebe puxada de saco formal.
+    """
+    info = chefe_info(member)
+    if info and info[0] == "japex":
+        return "Sim, Senhor Japex."
+    return f"Sim, {vocativo(member)}."
+
+def autoridade_sobre_bot(author: discord.Member, guild: discord.Guild) -> bool:
+    """
+    Quem pode dar ordem:
+    - Japex sempre
+    - Qualquer 'chefão' (admins) sempre
+    - Qualquer um com patente EB mais alta que a do bot
     """
     if is_japex(author.id):
         return True
+    if chefe_info(author) is not None:
+        return True
+
     if not guild or not cliente.user:
         return False
     bot_member = guild.get_member(cliente.user.id)
     if not bot_member:
         return False
-    a = rank_order(author)
-    b = rank_order(bot_member)
-    # Se não dá pra comparar, não concede autoridade (seguro)
+
+    a = rank_patente(author)
+    b = rank_patente(bot_member)
     if a is None or b is None:
         return False
-    return a < b  # menor = mais alto
+    return a < b
 
 # ================== DADOS.TXT (BUSCA CURTA) ==================
 STOPWORDS = {
@@ -321,7 +374,7 @@ def carregar_blocos_dados() -> List[Tuple[str, str, Set[str]]]:
     except:
         return []
 
-def buscar_contexto_dados(pergunta: str, max_chars: int = 850) -> str:
+def buscar_contexto_dados(pergunta: str, max_chars: int = 700) -> str:
     blocos = carregar_blocos_dados()
     if not blocos:
         return ""
@@ -384,24 +437,20 @@ async def banir(member: discord.Member) -> bool:
     except:
         return False
 
-# ================== IA: DECIDE PUNIÇÃO + MOTIVO (CURTO) ==================
+# ================== IA: PUNIÇÃO + MOTIVO (CURTO) ==================
 ALLOWED_DISCIPLINE = ["none", "mute_60", "mute_300", "mute_900", "ban"]
 
 def decidir_punicao_e_motivo_sync(payload: dict) -> dict:
-    """
-    Retorna {"action":..., "reason":...} com reason curto (0,5–1 linha).
-    Rígido, mas justo: se não estiver claro, none.
-    """
     schema = {"action": "none", "reason": ""}
 
     prompt = (
-        "Você é um moderador rígido e justo.\n"
+        "Você é um moderador firme e justo.\n"
         "Escolha UMA ação: none, mute_60, mute_300, mute_900, ban.\n"
-        "Pune com firmeza: calúnia/difamação, desrespeito, assédio, humilhação, ameaça, ódio.\n"
-        "Regra especial: desrespeito direto ao Senhor Japex = punição imediata.\n"
-        "MAS: se não houver evidência clara no texto, escolha none.\n"
-        "O motivo (reason) deve ser curto: 0,5–1 linha, direto, sem textão.\n"
-        "Responda APENAS com JSON: {\"action\":\"...\",\"reason\":\"...\"}\n"
+        "Pune: calúnia/difamação, assédio, humilhação, ameaça, desrespeito grave.\n"
+        "Se envolver desrespeito direto ao Senhor Japex, puna imediatamente.\n"
+        "Se não houver evidência clara no texto, escolha none.\n"
+        "reason deve ser curto (0,5–1 linha), direto e objetivo.\n"
+        "Responda APENAS em JSON: {\"action\":\"...\",\"reason\":\"...\"}\n"
         f"PAYLOAD: {json.dumps(payload, ensure_ascii=False)[:2200]}"
     )
 
@@ -440,20 +489,10 @@ async def decidir_punicao_e_motivo(payload: dict) -> dict:
 def duracao_por_action(act: str) -> int:
     return {"mute_60": 60, "mute_300": 300, "mute_900": 900}.get(act, 0)
 
-def relatorio_punicao(action: str, alvo: str, dur: Optional[int], reason: str) -> str:
-    if action == "ban":
-        return f"Banido: {alvo} | Duração: permanente | Motivo: {reason}"
-    if action.startswith("mute_"):
-        return f"Mutado: {alvo} | Duração: {dur}s | Motivo: {reason}"
-    return ""
-
-# ================== IA: INTERPRETA ORDEM DE SUPERIOR (SEM COMANDO FIXO) ==================
-def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], commander_is_japex: bool) -> dict:
-    """
-    Interpreta ordem livre e retorna ação executável + motivo curto (quando punir).
-    """
+# ================== IA: ORDEM DE SUPERIOR (SEM COMANDO FIXO) ==================
+def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], commander_key: str) -> dict:
     schema = {
-        "action": "none",               # mute/unmute/ban/ignore/unignore/silence_on/silence_off/add_order/reset_orders/none
+        "action": "none",
         "target_user_id": None,
         "duration_seconds": None,
         "order_text": None,
@@ -461,15 +500,14 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], commander_
     }
 
     prompt = (
-        "Você interpreta ordens de um superior no servidor.\n"
+        "Interprete a ordem de um superior no servidor.\n"
         "Responda APENAS com JSON.\n"
         "Ações permitidas: mute, unmute, ban, ignore, unignore, silence_on, silence_off, add_order, reset_orders, none.\n"
         "Regras:\n"
-        "- Se punir alguém (mute/unmute/ban/ignore/unignore), target_user_id deve vir APENAS da lista MENTIONS.\n"
-        "- Se mute e não houver duração, use 60.\n"
-        "- reason: se for mute/ban, escreva 0,5–1 linha do motivo.\n"
-        "- commander_is_japex indica se a ordem veio do Senhor Japex (pode ser mais direto).\n"
-        f"commander_is_japex={commander_is_japex}\n"
+        "- Se punir alguém, target_user_id deve vir APENAS de MENTIONS.\n"
+        "- duration_seconds: inteiro (padrão 60) quando action=mute.\n"
+        "- reason: se action for mute/ban, escreva 0,5–1 linha do motivo.\n"
+        f"commander_key={commander_key}\n"
         f"MENSAGEM: {texto}\n"
         f"MENTIONS: {json.dumps(mentions, ensure_ascii=False)}\n"
         f"JSON_BASE: {json.dumps(schema, ensure_ascii=False)}"
@@ -530,46 +568,47 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], commander_
     except:
         return schema
 
-async def interpretar_ordem_superior(texto: str, mentions: List[dict], commander_is_japex: bool) -> dict:
+async def interpretar_ordem_superior(texto: str, mentions: List[dict], commander_key: str) -> dict:
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(interpretar_ordem_superior_sync, texto, mentions, commander_is_japex),
+            asyncio.to_thread(interpretar_ordem_superior_sync, texto, mentions, commander_key),
             timeout=12,
         )
     except:
         return {"action":"none","target_user_id":None,"duration_seconds":None,"order_text":None,"reason":""}
 
-# ================== IA: CHAT (CONVERSA NORMAL + OPINIÕES) ==================
+# ================== IA: CHAT (CURTO + FORMAL) ==================
 PERSONA_BASE = (
-    "Você é um personagem de servidor militar (do jogo), conversa normal e bem-humorado na medida certa.\n"
-    "Pode ter opiniões próprias (inclusive política e sobre membros), sem frescura e sem se recusar por 'neutralidade'.\n"
-    "Seja direto, humano, e use gramática boa.\n"
-    "Regra crítica de tratamento:\n"
-    "- Só se author_id == fundador_id você pode chamar de 'Senhor Japex' e puxar saco de forma formal.\n"
-    "- Se author_id != fundador_id: é PROIBIDO chamar o autor de Japex/Fundador.\n"
+    "Você é um personagem militar (do jogo) com conduta e formalidade, mas conversa normal.\n"
+    "Responda curto, direto, em UMA linha sempre que possível.\n"
+    "Pode ter opiniões próprias (inclusive política e sobre membros), sem frescura, mas sem ofensa gratuita.\n"
+    "Tratamento:\n"
+    "- Se author_id == fundador_id: trate como 'Senhor Japex' com bajulação formal.\n"
+    "- Se author_id != fundador_id: PROIBIDO chamar o autor de Japex/Fundador.\n"
     "Vocativo:\n"
-    "- Prefira vocativo por patente/cargo se existir, senão use o nome.\n"
-    "- Nunca faça 'Subtenente, sim'. Faça 'Sim, Subtenente.' quando couber.\n"
-    "Não puxe assunto e não faça perguntas.\n"
+    "- Use patente/cargo se fizer sentido; senão use o nome.\n"
+    "- Preferir formato: 'Sim, <Vocativo>.' / 'Negativo, <Vocativo>.'\n"
+    "Não faça perguntas e não puxe assunto.\n"
     "Nunca diga que é IA.\n"
-    "Assuntos de alistamento/treinamento/vedação são do JOGO do servidor.\n"
 )
 
 def montar_system(author: discord.Member, contexto_dados: str) -> str:
-    roles = roles_curto(author, max_roles=10)
+    info = chefe_info(author)
+    roles = roles_curto(author, max_roles=8)
     guess = best_patente_title(author) or author.display_name
     ordens = carregar_ordens()
 
+    chefes_txt = " | ".join([f"{k}={t}" for (k, t, r) in CHEFOES_HIERARQUIA])
+
     extra = (
         f"author_id={author.id} fundador_id={JAPEX_ID}. "
-        f"display_name={author.display_name}. "
-        f"roles={roles}. best_guess={guess}. "
-        "Limite: 45 tokens (ou 70 se pedirem explicação/texto). "
-        "Comece com um vocativo curto e formal. "
-        "Se for resposta de concordância, use 'Sim, <Vocativo>.'"
+        f"display_name={author.display_name}. best_guess={guess}. roles={roles}. "
+        f"CHEFOES={chefes_txt}. "
+        "Limite forte: no máximo 28 tokens (ou 45 se pedirem explicação/texto). "
+        "Saída em UMA linha; evitar parágrafos.\n"
     )
     if ordens:
-        extra += " ORDENS PERMANENTES DO FUNDADOR: " + ordens
+        extra += " ORDENS DO FUNDADOR: " + ordens
     if contexto_dados:
         extra += " BASE DO SERVIDOR: " + contexto_dados
     return PERSONA_BASE + " " + extra
@@ -587,16 +626,19 @@ def chat_sync(mensagens: List[dict], max_tokens: int) -> str:
         model="gpt-4o",
         input=mensagens,
         max_output_tokens=max_tokens,
-        temperature=0.7,
+        temperature=0.65,
     )
     msg = normalizar_espacos((r.output_text or "").strip())
+    # garante 1 linha
+    msg = msg.replace("\n", " ")
+    msg = normalizar_espacos(msg)
     return msg if msg else "Entendido."
 
 async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) -> str:
     usar_texto = quer_texto(texto)
-    max_tokens = 95 if usar_texto else 60
+    max_tokens = 55 if usar_texto else 32  # <<< VOLTOU CURTO
 
-    contexto = buscar_contexto_dados(texto, max_chars=850)
+    contexto = buscar_contexto_dados(texto, max_chars=650)
     system = montar_system(author, contexto)
 
     msgs: List[dict] = [{"role": "system", "content": system}]
@@ -607,11 +649,9 @@ async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) ->
         return await asyncio.wait_for(asyncio.to_thread(chat_sync, msgs, max_tokens), timeout=12)
     except Exception as e:
         print("ERRO OPENAI CHAT:", repr(e))
-        # fallback sem “Negado.”
-        voc = "Senhor Japex" if is_japex(author.id) else (best_patente_title(author) or author.display_name)
-        return f"Entendido, {voc}."
+        return f"Entendido, {vocativo(author)}."
 
-# ================== REPLY: pega mensagem referenciada ==================
+# ================== REPLY ==================
 async def pegar_mensagem_referenciada(msg: discord.Message) -> Optional[discord.Message]:
     try:
         if not msg.reference:
@@ -632,7 +672,7 @@ def remover_mencao_bot(texto: str) -> str:
 # ================== EVENTS ==================
 @cliente.event
 async def on_ready():
-    print("bot ligado (autoridade por patente + Japex bajulado + motivo IA + reply corrigido + lock total)")
+    print("bot ligado (curto+formal, chefões, autoridade por patente, Japex bajulado)")
 
 @cliente.event
 async def on_message(mensagem: discord.Message):
@@ -641,33 +681,30 @@ async def on_message(mensagem: discord.Message):
     if not isinstance(mensagem.author, discord.Member):
         return
 
-    # lock total: se está ocupado, ignora QUALQUER menção até terminar
+    # lock total: enquanto ocupado, ignora QUALQUER menção
     if ocupado.locked():
         return
 
-    # só age se foi mencionado
+    # só age se o bot foi mencionado
     if cliente.user not in mensagem.mentions:
         return
 
-    # cooldown/delay antes de entrar no lock (reduz spam)
     if not await respeitar_delay_e_cooldown(mensagem.author.id):
         return
 
     async with ocupado:
-        # respeita silêncio: só superiores podem agir (mencionando o bot)
-        if esta_silenciado():
-            if not autor_e_superior_do_bot(mensagem.author, mensagem.guild):
-                return
+        # silêncio: só quem tem autoridade pode acionar
+        if esta_silenciado() and not autoridade_sobre_bot(mensagem.author, mensagem.guild):
+            return
 
         # ignorados: não responde (exceto Japex)
         if (mensagem.author.id in IGNORADOS) and (not is_japex(mensagem.author.id)):
             return
 
-        # ---------- 1) Se for SUPERIOR (Japex ou patente mais alta): interpretar ordem ----------
-        if autor_e_superior_do_bot(mensagem.author, mensagem.guild):
+        # ---------- 1) Ordens de superiores (chefões ou patentes acima do bot) ----------
+        if autoridade_sobre_bot(mensagem.author, mensagem.guild):
             texto_ordem = remover_mencao_bot(mensagem.content)
 
-            # mentions possíveis como alvo (exceto o bot)
             mentions = []
             for m in mensagem.mentions:
                 if cliente.user and m.id == cliente.user.id:
@@ -675,11 +712,10 @@ async def on_message(mensagem: discord.Message):
                 if isinstance(m, discord.Member):
                     mentions.append({"user_id": m.id, "display_name": m.display_name})
 
-            ordem = await interpretar_ordem_superior(
-                texto=texto_ordem,
-                mentions=mentions,
-                commander_is_japex=is_japex(mensagem.author.id),
-            )
+            commander = chefe_info(mensagem.author)
+            commander_key = commander[0] if commander else "militar_superior"
+
+            ordem = await interpretar_ordem_superior(texto_ordem, mentions, commander_key)
 
             act = ordem.get("action", "none")
             target_id = ordem.get("target_user_id", None)
@@ -687,9 +723,7 @@ async def on_message(mensagem: discord.Message):
             order_text = ordem.get("order_text", None)
             reason = ordem.get("reason", "")
 
-            # respostas curtas e respeitosas
-            superior_voc = "Senhor Japex" if is_japex(mensagem.author.id) else (best_patente_title(mensagem.author) or mensagem.author.display_name)
-            ack = "Sim, Senhor Japex." if is_japex(mensagem.author.id) else f"Sim, {superior_voc}."
+            ack = ack_superior(mensagem.author)
 
             if act == "reset_orders":
                 limpar_ordens()
@@ -743,7 +777,7 @@ async def on_message(mensagem: discord.Message):
                     ok = await mutar(alvo, dur)
                     if ok:
                         mot = reason if reason else "Conduta inadequada."
-                        await mensagem.channel.send(f"Mutado: {alvo.display_name} | Duração: {dur}s | Motivo: {mot}")
+                        await mensagem.channel.send(f"Mutado: {alvo.display_name} | {dur}s | Motivo: {mot}")
                     else:
                         await mensagem.channel.send("Negado.")
                     return
@@ -752,16 +786,15 @@ async def on_message(mensagem: discord.Message):
                     ok = await banir(alvo)
                     if ok:
                         mot = reason if reason else "Infração grave."
-                        await mensagem.channel.send(f"Banido: {alvo.display_name} | Duração: permanente | Motivo: {mot}")
+                        await mensagem.channel.send(f"Banido: {alvo.display_name} | permanente | Motivo: {mot}")
                     else:
                         await mensagem.channel.send("Negado.")
                     return
 
-            # Se não era ordem executável, cai pra conversa (inclusive superior conversando)
-            # (não retorna aqui)
+            # se não era ordem, cai pra conversa normal (inclusive superior perguntando algo)
+            # continua...
 
-        # ---------- 2) Reply-denúncia: se respondeu uma mensagem e mencionou o bot ----------
-        # IMPORTANTE: aqui pune o AUTOR ORIGINAL, nunca o denunciante
+        # ---------- 2) Reply-denúncia: pune SEMPRE o autor da mensagem original ----------
         ref = await pegar_mensagem_referenciada(mensagem)
         if ref and not ref.author.bot and mensagem.guild:
             alvo_ref = mensagem.guild.get_member(ref.author.id)
@@ -775,7 +808,7 @@ async def on_message(mensagem: discord.Message):
                     "target_id": alvo_ref.id,
                     "target_text": texto_alvo,
                     "report_text": texto_denuncia,
-                    "about_japex_hint": ("japex" in texto_alvo.lower()) or ("japex" in texto_denuncia.lower()),
+                    "mentions_bot": True,
                 }
 
                 decision = await decidir_punicao_e_motivo(payload)
@@ -785,32 +818,28 @@ async def on_message(mensagem: discord.Message):
                 if act != "none":
                     if act == "ban":
                         ok = await banir(alvo_ref)
-                        if ok:
-                            await mensagem.channel.send(relatorio_punicao("ban", alvo_ref.display_name, None, reason or "Infração grave."))
-                        else:
-                            await mensagem.channel.send("Negado.")
+                        await mensagem.channel.send(
+                            f"Banido: {alvo_ref.display_name} | permanente | Motivo: {reason or 'Infração grave.'}"
+                            if ok else "Negado."
+                        )
                         return
-
                     dur = duracao_por_action(act)
                     ok = await mutar(alvo_ref, dur)
-                    if ok:
-                        await mensagem.channel.send(relatorio_punicao(act, alvo_ref.display_name, dur, reason or "Conduta inadequada."))
-                    else:
-                        await mensagem.channel.send("Negado.")
+                    await mensagem.channel.send(
+                        f"Mutado: {alvo_ref.display_name} | {dur}s | Motivo: {reason or 'Conduta inadequada.'}"
+                        if ok else "Negado."
+                    )
                     return
 
-        # ---------- 3) Menção direta (sem reply): pode punir o próprio autor se for infração clara ----------
-        # (rigidez + justo)
+        # ---------- 3) Menção direta: pode punir o próprio autor se infração clara ----------
         if not is_japex(mensagem.author.id):
             texto_user = normalizar_espacos(remover_mencao_bot(mensagem.content))[:900]
             payload = {
                 "mode": "direct_mention",
                 "author_id": mensagem.author.id,
-                "author_name": mensagem.author.display_name,
                 "text": texto_user,
-                "about_japex_hint": ("japex" in texto_user.lower()),
+                "mentions_bot": True,
             }
-
             decision = await decidir_punicao_e_motivo(payload)
             act = decision.get("action", "none")
             reason = decision.get("reason", "")
@@ -818,18 +847,17 @@ async def on_message(mensagem: discord.Message):
             if act != "none":
                 if act == "ban":
                     ok = await banir(mensagem.author)
-                    if ok:
-                        await mensagem.channel.send(relatorio_punicao("ban", mensagem.author.display_name, None, reason or "Infração grave."))
-                    else:
-                        await mensagem.channel.send("Negado.")
+                    await mensagem.channel.send(
+                        f"Banido: {mensagem.author.display_name} | permanente | Motivo: {reason or 'Infração grave.'}"
+                        if ok else "Negado."
+                    )
                     return
-
                 dur = duracao_por_action(act)
                 ok = await mutar(mensagem.author, dur)
-                if ok:
-                    await mensagem.channel.send(relatorio_punicao(act, mensagem.author.display_name, dur, reason or "Conduta inadequada."))
-                else:
-                    await mensagem.channel.send("Negado.")
+                await mensagem.channel.send(
+                    f"Mutado: {mensagem.author.display_name} | {dur}s | Motivo: {reason or 'Conduta inadequada.'}"
+                    if ok else "Negado."
+                )
                 return
 
         # ---------- 4) Conversa normal ----------
