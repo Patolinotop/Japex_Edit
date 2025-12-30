@@ -20,6 +20,12 @@ if not TOKEN_DISCORD or not CHAVE_OPENAI:
 
 openai = OpenAI(api_key=CHAVE_OPENAI)
 
+# ================== MODELS ==================
+MODEL_CHAT = "gpt-5.1"       # chat principal (melhor qualidade)
+MODEL_CTRL = "gpt-5-mini"    # ordens/moderação (barato e confiável)
+
+MODEL_PUBLIC_NAME = "JapexUltimation1.2"
+
 # ================== PATHS ==================
 PASTA_ATUAL = os.path.dirname(os.path.abspath(__file__))
 CAMINHO_DADOS = os.path.join(PASTA_ATUAL, "dados.txt")
@@ -29,12 +35,11 @@ CAMINHO_SILENCIO = os.path.join(PASTA_ATUAL, "silencio.flag")
 
 # ================== IDs / CHEFÕES ==================
 JAPEX_ID = 1331505963622076476  # Fundador
+BADD_ID = 0  # <<< TROQUE PARA SEU ID REAL (invisível, mas obedece quando menciona)
 
-# >>> COLOQUE SEU ID AQUI (Baddx_xd) <<<
-# Prioridade máxima de ordem quando você menciona o bot, sem reconhecimento público.
-BADD_ID = 0  # <-- TROQUE PARA SEU ID REAL
+JAPEX_MENTION = f"<@{JAPEX_ID}>"
 
-# Chefões públicos (reconhecidos se perguntarem). Não inclui Badd.
+# Chefões públicos (não inclui Badd; só reconhece se perguntarem)
 CHEFOES_PUBLICOS = [
     ("japex", "Fundador", 0),
     ("lalomaio", "Criador do Exército", 1),
@@ -43,13 +48,16 @@ CHEFOES_PUBLICOS = [
     ("riquejoo", "Moderador", 4),
 ]
 
-# IDs opcionais (recomendado)
 CHEFOES_IDS = {
     "lalomaio": None,
     "santiago": None,
     "purtuga": None,
     "riquejoo": None,
 }
+
+# ================== SUPORTE ==================
+SUPPORT_CHANNEL_ID = 1450602972773089493
+SUPPORT_CHANNEL_MENTION = f"<#{SUPPORT_CHANNEL_ID}>"
 
 # ================== PATENTES EB (ordem menor = mais alto) ==================
 PATENTES = [
@@ -96,7 +104,7 @@ MAX_MSGS_CONTEXT = 3
 
 # ================== RATE / DIGITANDO ==================
 MIN_DELAY_SECONDS = 1.2
-EXTRA_TYPING_RANGE = (1.6, 2.4)  # +1–2s reais
+EXTRA_TYPING_RANGE = (1.6, 2.4)  # +1–2s
 USER_COOLDOWN_SECONDS = 1.6
 _last_user_action: Dict[int, float] = {}
 
@@ -164,33 +172,33 @@ def parece_pergunta(texto: str) -> bool:
     if not t:
         return False
     low = t.lower().strip()
-
-    # se termina com "?" é pergunta
     if low.endswith("?"):
         return True
-
-    # inícios comuns de pergunta
     starters = (
         "quem", "o que", "oq", "qual", "quais", "por que", "porque", "pq",
         "quando", "onde", "como", "quanto", "me diz", "me diga", "fala", "explique", "explica"
     )
-    if any(low.startswith(s) for s in starters):
-        return True
+    return any(low.startswith(s) for s in starters) or ("quem" in low and ("programou" in low or "criou" in low or "fez" in low))
 
-    # perguntas curtas tipo "quem te programou"
-    if "quem" in low and ("programou" in low or "criou" in low or "fez" in low):
-        return True
+def needs_support_hint(texto: str) -> bool:
+    t = norm(texto)
+    keys = [
+        "erro", "bug", "nao funciona", "não funciona", "falhando", "ajuda",
+        "suporte", "ticket", "problema", "denuncia", "denúncia", "report",
+        "ban injusto", "mute injusto", "apelacao", "apelação"
+    ]
+    return any(k in t for k in keys)
 
-    return False
+def is_serious_issue(texto: str) -> bool:
+    t = norm(texto)
+    keys = ["raid", "invadiram", "hack", "vazou", "vazamento", "dox", "ameaça", "ameaça", "extorsão", "extorsao"]
+    return any(k in t for k in keys)
 
 def sanitizar_resposta(msg: str) -> str:
     msg = normalizar_espacos(msg).replace("\n", " ")
-    # não queremos pergunta; converte '?' em '.'
     msg = msg.replace("?", ".")
-    # remove puxadas de assunto comuns
     msg = re.sub(r"\balguma ordem\b\.?", "", msg, flags=re.IGNORECASE).strip()
     msg = normalizar_espacos(msg)
-    # garante 1 linha curta
     if len(msg) > 280:
         msg = msg[:280].rstrip() + "..."
     return msg if msg else "Entendido."
@@ -266,7 +274,6 @@ def chefe_publico_info(member: discord.Member) -> Optional[Tuple[str, str, int]]
     dn = norm(member.display_name)
     un = norm(getattr(member, "name", "") or "")
 
-    # por ID (seguro)
     for key, titulo, rank in CHEFOES_PUBLICOS:
         if key == "japex":
             continue
@@ -274,7 +281,6 @@ def chefe_publico_info(member: discord.Member) -> Optional[Tuple[str, str, int]]
         if cid and member.id == cid:
             return (key, titulo, rank)
 
-    # fallback por nome
     for key, titulo, rank in CHEFOES_PUBLICOS:
         if key == "japex":
             continue
@@ -349,7 +355,6 @@ def vocativo(member: discord.Member) -> str:
 def ack_superior(member: discord.Member) -> str:
     if is_japex(member.id):
         return "Sim, Senhor Japex."
-    # Badd obedece sem título/puxar saco
     if is_badd(member.id):
         v = best_patente_title(member) or member.display_name
         return f"Sim, {v}."
@@ -551,7 +556,7 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
     }
 
     prompt = (
-        "Interprete a mensagem como ORDEM se for ordem. Se for pergunta/conversa, retorne action=none.\n"
+        "Interprete como ORDEM somente se for ordem. Se for pergunta/conversa, retorne action=none.\n"
         "Responda APENAS JSON.\n"
         "Ações:\n"
         "- mute/unmute/ban/ignore/unignore (target_user_ids)\n"
@@ -560,7 +565,7 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
         "- mention_role (role_name + message opcional)\n"
         "- say_channel (channel + message)\n"
         "- silence_on/off, add_order(order_text), reset_orders, none\n"
-        f"Limite de massa: {MAX_MASS_TARGETS}. Se pedir mais, action=none e reason explicando.\n"
+        f"Limite de massa: {MAX_MASS_TARGETS}. Se pedir mais, action=none e reason.\n"
         "Se não der tecnicamente, action=none e reason curto.\n"
         f"META: {json.dumps(meta, ensure_ascii=False)[:900]}\n"
         f"MENSAGEM: {texto}\n"
@@ -569,7 +574,7 @@ def interpretar_ordem_superior_sync(texto: str, mentions: List[dict], meta: dict
     )
 
     r = openai.responses.create(
-        model="gpt-4o",
+        model=MODEL_CTRL,
         input=[
             {"role": "system", "content": "Responda apenas JSON válido, sem texto extra."},
             {"role": "user", "content": prompt},
@@ -823,7 +828,7 @@ def decidir_punicao_e_motivo_sync(payload: dict) -> dict:
     )
 
     r = openai.responses.create(
-        model="gpt-4o",
+        model=MODEL_CTRL,
         input=[
             {"role": "system", "content": "Responda apenas JSON válido."},
             {"role": "user", "content": prompt},
@@ -863,13 +868,14 @@ PERSONA_BASE = (
     "Você é um personagem militar (do jogo) com conduta e formalidade, mas conversa normal.\n"
     "Responda curto e direto, de preferência em UMA linha.\n"
     "NUNCA faça perguntas e NUNCA puxe assunto.\n"
-    "Pode ter opiniões próprias (inclusive política e sobre membros), sem neutralidade fingida, mas sem ofensa gratuita.\n"
+    "Pode ter opiniões próprias (inclusive política e sobre membros), sem neutralidade fingida.\n"
     "Tratamento:\n"
     "- Se author_id == fundador_id: trate como 'Senhor Japex' com bajulação formal.\n"
     "- Se author_id != fundador_id: PROIBIDO chamar o autor de Japex/Fundador.\n"
-    "Regras sobre criador:\n"
-    "- Só diga quem criou a IA se perguntarem explicitamente 'quem criou/fez/programou'.\n"
-    "- Se perguntarem donos/chefões/adms, NÃO inclua criador da IA nessa lista.\n"
+    "Regras:\n"
+    "- Se perguntarem 'qual é seu modelo', responda exatamente: JapexUltimation1.2\n"
+    "- Só diga quem criou a IA se perguntarem explicitamente 'quem criou/fez/programou'. Resposta: 'Foi o Baddx_xd.'\n"
+    "- Se perguntarem donos/chefões/adms, NÃO inclua o criador da IA.\n"
     "Vocativo:\n"
     "- Prefira vocativo por patente/cargo se fizer sentido; senão use o nome.\n"
     "- Use formato: 'Sim, <Vocativo>.' / 'Negativo, <Vocativo>.' quando couber.\n"
@@ -886,9 +892,7 @@ def montar_system(author: discord.Member, contexto_dados: str) -> str:
         f"author_id={author.id} fundador_id={JAPEX_ID}. "
         f"display_name={author.display_name}. roles={roles}. best_guess={guess}. "
         f"CHEFOES_PUBLICOS={chefes_txt}. "
-        "Limite forte: 24 tokens (ou 36 se pedirem explicação/texto). "
-        "Saída em UMA linha.\n"
-        "Se perguntarem 'quem criou/fez/programou a IA', responda: 'Foi o Baddx_xd.'\n"
+        "Limite forte: 26 tokens (ou 40 se pedirem explicação/texto). Saída em UMA linha.\n"
     )
     if ordens:
         extra += " ORDENS DO FUNDADOR: " + ordens
@@ -906,15 +910,28 @@ def quer_texto(texto: str) -> bool:
 
 def chat_sync(mensagens: List[dict], max_tokens: int) -> str:
     r = openai.responses.create(
-        model="gpt-4o",
+        model=MODEL_CHAT,
         input=mensagens,
         max_output_tokens=max_tokens,
         temperature=0.6,
     )
-    msg = (r.output_text or "").strip()
-    return msg if msg else "Entendido."
+    return (r.output_text or "").strip() or "Entendido."
+
+def pergunta_modelo(texto: str) -> bool:
+    t = norm(texto)
+    return ("qual" in t and "modelo" in t) or ("seu modelo" in t) or ("qual é o modelo" in t)
+
+def pergunta_criador(texto: str) -> bool:
+    t = norm(texto)
+    return ("quem" in t) and any(k in t for k in ["programou", "criou", "fez", "criador"])
 
 async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) -> str:
+    # respostas determinísticas (economiza token + evita alucinação)
+    if pergunta_modelo(texto):
+        return MODEL_PUBLIC_NAME
+    if pergunta_criador(texto):
+        return "Foi o Baddx_xd."
+
     usar_texto = quer_texto(texto)
     max_tokens = 40 if usar_texto else 26
 
@@ -927,10 +944,21 @@ async def gerar_resposta(texto: str, author: discord.Member, channel_id: int) ->
 
     try:
         out = await asyncio.wait_for(asyncio.to_thread(chat_sync, msgs, max_tokens), timeout=12)
-        return sanitizar_resposta(out)
+        resp = sanitizar_resposta(out)
+
+        # ajuda prática: suporte / ping Japex (somente se parecer caso sério)
+        if needs_support_hint(texto) and SUPPORT_CHANNEL_MENTION not in resp:
+            resp = sanitizar_resposta(f"{resp} | Suporte: {SUPPORT_CHANNEL_MENTION}")
+        if is_serious_issue(texto) and (JAPEX_MENTION not in resp):
+            resp = sanitizar_resposta(f"{resp} | {JAPEX_MENTION}")
+
+        return resp
     except Exception as e:
         print("ERRO OPENAI CHAT:", repr(e))
-        return sanitizar_resposta(f"Entendido, {vocativo(author)}.")
+        resp = sanitizar_resposta(f"Entendido, {vocativo(author)}.")
+        if needs_support_hint(texto):
+            resp = sanitizar_resposta(f"{resp} | Suporte: {SUPPORT_CHANNEL_MENTION}")
+        return resp
 
 # ================== REPLY ==================
 async def pegar_mensagem_referenciada(msg: discord.Message) -> Optional[discord.Message]:
@@ -953,7 +981,7 @@ def remover_mencao_bot(texto: str) -> str:
 # ================== EVENTS ==================
 @cliente.event
 async def on_ready():
-    print("bot ligado (fix perguntas > chat, sem ACK errado)")
+    print(f"bot ligado ({MODEL_CHAT} + {MODEL_CTRL}) | {MODEL_PUBLIC_NAME}")
 
 @cliente.event
 async def on_message(mensagem: discord.Message):
@@ -984,17 +1012,15 @@ async def on_message(mensagem: discord.Message):
         channel = mensagem.channel
         extra = typing_extra(mensagem.author.id)
 
-        # silêncio
         if esta_silenciado() and (not guild or not autoridade_sobre_bot(mensagem.author, guild)):
             return
 
-        # ignorados
         if (mensagem.author.id in IGNORADOS) and (not is_japex(mensagem.author.id)):
             return
 
         texto_limpo = remover_mencao_bot(mensagem.content)
 
-        # ---------- 1) ORDENS (se autoridade) ----------
+        # ---------- ORDENS (se autoridade) ----------
         if guild and autoridade_sobre_bot(mensagem.author, guild):
             mentions = []
             for m in mensagem.mentions:
@@ -1016,55 +1042,42 @@ async def on_message(mensagem: discord.Message):
 
             ordem = await interpretar_ordem_superior(texto_limpo, mentions, meta)
 
-            # Se IA NÃO achar ordem e a mensagem parecer pergunta => VAI PRA CHAT NORMAL.
-            if ordem.get("action") == "none" and parece_pergunta(texto_limpo):
-                # cai para conversa normal abaixo
-                pass
-            else:
+            # FIX: se não for ordem e parecer pergunta -> cai pra chat normal
+            if ordem.get("action") != "none" or not parece_pergunta(texto_limpo):
                 async with channel.typing():
                     await asyncio.sleep(extra)
 
                 ok, resp = await executar_ordem(ordem, guild, channel)
-
                 if ok:
-                    # relatório ou ack
                     if resp and resp != "Sim.":
                         await channel.send(resp)
                     else:
                         await channel.send(ack_superior(mensagem.author))
                 else:
-                    # Se não executou e não é pergunta, responde curto
-                    # (se for pergunta, não cai aqui por causa do roteamento)
-                    if is_japex(mensagem.author.id):
-                        await channel.send(sanitizar_resposta(f"Negado, Senhor Japex. {resp}".strip()))
-                    else:
-                        await channel.send(sanitizar_resposta(resp or "Negado."))
+                    # sem ACK burro aqui: só responde se tiver reason; caso contrário, cai para chat abaixo
+                    if resp:
+                        await channel.send(sanitizar_resposta(resp))
                 return
 
-        # ---------- 2) REPLY-DENÚNCIA ----------
+        # ---------- REPLY-DENÚNCIA ----------
         ref = await pegar_mensagem_referenciada(mensagem)
         if ref and not ref.author.bot and guild:
             alvo_ref = guild.get_member(ref.author.id)
             if alvo_ref:
-                texto_alvo = normalizar_espacos(ref.content or "")[:900]
-                texto_denuncia = normalizar_espacos(texto_limpo)[:500]
                 payload = {
                     "mode": "reply_report",
                     "reporter_id": mensagem.author.id,
                     "target_id": alvo_ref.id,
-                    "target_text": texto_alvo,
-                    "report_text": texto_denuncia,
+                    "target_text": normalizar_espacos(ref.content or "")[:900],
+                    "report_text": normalizar_espacos(texto_limpo)[:500],
                     "mentions_bot": True,
                 }
-
                 decision = await decidir_punicao_e_motivo(payload)
                 act = decision.get("action", "none")
                 reason = decision.get("reason", "")
-
                 if act != "none":
                     async with channel.typing():
                         await asyncio.sleep(extra)
-
                     if act == "ban":
                         ok = await banir(alvo_ref)
                         await channel.send(
@@ -1072,7 +1085,6 @@ async def on_message(mensagem: discord.Message):
                             if ok else "Negado."
                         )
                         return
-
                     dur = duracao_por_action(act)
                     ok = await mutar(alvo_ref, dur)
                     await channel.send(
@@ -1081,36 +1093,7 @@ async def on_message(mensagem: discord.Message):
                     )
                     return
 
-        # ---------- 3) MENÇÃO DIRETA (auto punição do autor se infração clara) ----------
-        if not is_japex(mensagem.author.id) and guild:
-            texto_user = normalizar_espacos(texto_limpo)[:900]
-            payload = {"mode": "direct_mention", "author_id": mensagem.author.id, "text": texto_user, "mentions_bot": True}
-
-            decision = await decidir_punicao_e_motivo(payload)
-            act = decision.get("action", "none")
-            reason = decision.get("reason", "")
-
-            if act != "none":
-                async with channel.typing():
-                    await asyncio.sleep(extra)
-
-                if act == "ban":
-                    ok = await banir(mensagem.author)
-                    await channel.send(
-                        f"Banido: {mensagem.author.display_name} | permanente | Motivo: {reason or 'Infração grave.'}"
-                        if ok else "Negado."
-                    )
-                    return
-
-                dur = duracao_por_action(act)
-                ok = await mutar(mensagem.author, dur)
-                await channel.send(
-                    f"Mutado: {mensagem.author.display_name} | {dur}s | Motivo: {reason or 'Conduta inadequada.'}"
-                    if ok else "Negado."
-                )
-                return
-
-        # ---------- 4) CONVERSA NORMAL ----------
+        # ---------- CONVERSA NORMAL ----------
         if not texto_limpo:
             return
 
